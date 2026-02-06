@@ -1,6 +1,7 @@
 import { useState, useMemo } from 'react';
 import { Sale, DashboardKPIs, PeriodFilter, SaleStatus, PaymentMethod } from '../types';
 import { TICKETS, TARGETS, FEE_RATE, TAX_RATE, ANNUAL_REVENUE_TARGET } from '../constants';
+import { SeededRNG } from '../utils/rng';
 import {
   startOfDay,
   endOfDay,
@@ -11,10 +12,17 @@ import {
   isWithinInterval,
   startOfYear,
   parseISO,
-  isValid
+  isValid,
+  format
 } from 'date-fns';
 
-const generateSalesForAmount = (target: number, startDate: Date, endDate: Date): Sale[] => {
+// Helper to create a stable seed from dates
+const getSeedFromDate = (date: Date): number => {
+  return parseInt(format(date, 'yyyyMMdd'), 10);
+};
+
+// Modified: Accepts RNG instance instead of using Math.random
+const generateSalesForAmount = (target: number, startDate: Date, endDate: Date, rng: SeededRNG): Sale[] => {
   const sales: Sale[] = [];
   let currentTotal = 0;
 
@@ -22,31 +30,35 @@ const generateSalesForAmount = (target: number, startDate: Date, endDate: Date):
 
   let iterations = 0;
   // Safety cap to prevent infinite loops or performance hits
-  while (currentTotal < target && iterations < 2000) {
+  while (currentTotal < target && iterations < 5000) {
     iterations++;
-    const value = TICKETS[Math.floor(Math.random() * TICKETS.length)];
-    // Allow a very small random overshoot for realism
-    if (currentTotal + value > target + 1500) break;
+    // Deterministic value selection
+    const value = rng.pick(TICKETS);
 
-    const date = new Date(startDate.getTime() + Math.random() * (endDate.getTime() - startDate.getTime()));
+    // Allow a small "random" overshoot for realism using RNG
+    if (currentTotal + value > target + (1500 * rng.next())) break;
 
-    const statusRand = Math.random();
+    // Deterministic date selection within the range
+    const timeSpan = endDate.getTime() - startDate.getTime();
+    const date = new Date(startDate.getTime() + rng.next() * timeSpan);
+
+    const statusRand = rng.next();
     let status: SaleStatus = 'paid';
     // 5% pending/refunded/chargeback for realism
     if (statusRand > 0.95) status = 'pending';
     else if (statusRand > 0.98) status = 'refunded';
 
-    const payRand = Math.random();
+    const payRand = rng.next();
     let paymentMethod: PaymentMethod = 'Cartão de Crédito';
     if (payRand > 0.6) paymentMethod = 'Pix';
     else if (payRand > 0.9) paymentMethod = 'Boleto';
 
     sales.push({
-      id: Math.random().toString(36).substring(2, 11),
+      id: Math.floor(rng.next() * 1000000).toString(36), // Stable ID from RNG
       value,
       date,
       paymentMethod,
-      adAccount: `Conta 0${Math.floor(Math.random() * 3) + 1}`,
+      adAccount: `Conta 0${rng.nextInt(1, 4)}`,
       platform: 'Orgânico',
       source: 'Orgânico',
       status,
@@ -56,6 +68,7 @@ const generateSalesForAmount = (target: number, startDate: Date, endDate: Date):
   return sales;
 };
 
+// Generates the immutable list of all potential sales
 const generateMasterSalesList = (): Sale[] => {
   const today = new Date();
   const yesterday = subDays(today, 1);
@@ -64,26 +77,38 @@ const generateMasterSalesList = (): Sale[] => {
   const lastMonthEnd = endOfMonth(subMonths(today, 1));
   const yearStart = startOfYear(today);
 
-  // 1. TODAY: Fixed Target 1800
-  // Using endOfDay to allow full day simulation as requested ("Last second of today")
-  const salesToday = generateSalesForAmount(TARGETS.revenueToday, startOfDay(today), endOfDay(today));
+  // 1. TODAY: Fixed Seed based on Date
+  // We generate a full day of sales (up to 23:59:59) deterministically.
+  // The filtering logic in the hook will hide future sales.
+  const seedToday = getSeedFromDate(today);
+  const rngToday = new SeededRNG(seedToday);
+  const salesToday = generateSalesForAmount(TARGETS.revenueToday, startOfDay(today), endOfDay(today), rngToday);
 
-  // 2. YESTERDAY: Fixed Target 2400
-  const salesYesterday = generateSalesForAmount(TARGETS.revenueYesterday, startOfDay(yesterday), endOfDay(yesterday));
+  // 2. YESTERDAY: Fixed Seed based on Yesterday's Date
+  const seedYesterday = getSeedFromDate(yesterday);
+  const rngYesterday = new SeededRNG(seedYesterday);
+  const salesYesterday = generateSalesForAmount(TARGETS.revenueYesterday, startOfDay(yesterday), endOfDay(yesterday), rngYesterday);
 
-  // 3. THIS MONTH: Target 38550 (minus today and yesterday)
+  // 3. THIS MONTH (excluding today/yesterday for generating "remainder"): 
+  // We use a fixed month seed.
+  const seedMonth = parseInt(format(today, 'yyyyMM'), 10);
+  const rngMonth = new SeededRNG(seedMonth);
   const monthAccumulated = TARGETS.revenueToday + TARGETS.revenueYesterday;
   const remainingThisMonth = Math.max(0, TARGETS.revenueThisMonth - monthAccumulated);
-  const salesRemainingMonth = generateSalesForAmount(remainingThisMonth, thisMonthStart, subDays(yesterday, 1));
+  // Generate for period [StartOfMonth -> Yesterday-2days]
+  const salesRemainingMonth = generateSalesForAmount(remainingThisMonth, thisMonthStart, subDays(yesterday, 1), rngMonth);
 
-  // 4. LAST MONTH: Fixed Target 36700
-  const salesLastMonth = generateSalesForAmount(TARGETS.revenueLastMonth, lastMonthStart, lastMonthEnd);
+  // 4. LAST MONTH
+  const seedLastMonth = parseInt(format(subMonths(today, 1), 'yyyyMM'), 10);
+  const rngLastMonth = new SeededRNG(seedLastMonth);
+  const salesLastMonth = generateSalesForAmount(TARGETS.revenueLastMonth, lastMonthStart, lastMonthEnd, rngLastMonth);
 
-  // 5. REMAINING YEAR: Target to reach 250000 total
+  // 5. REMAINING YEAR
+  const seedYear = parseInt(format(today, 'yyyy'), 10);
+  const rngYear = new SeededRNG(seedYear);
   const yearAccumulated = TARGETS.revenueThisMonth + TARGETS.revenueLastMonth;
   const remainingYearTarget = Math.max(0, ANNUAL_REVENUE_TARGET - yearAccumulated);
-  // Spread across the rest of the year (start of year up to 2 months ago)
-  const salesRestOfYear = generateSalesForAmount(remainingYearTarget, yearStart, subDays(lastMonthStart, 1));
+  const salesRestOfYear = generateSalesForAmount(remainingYearTarget, yearStart, subDays(lastMonthStart, 1), rngYear);
 
   return [
     ...salesToday,
@@ -101,7 +126,9 @@ interface UseSimulatedDataProps {
 }
 
 export const useSimulatedData = ({ period, from, to }: UseSimulatedDataProps) => {
-  // Master list generated once and persistent
+  // Master list generated ONCE. 
+  // Since the logic inside generateMasterSalesList() is now deterministic based on dates,
+  // this list will be identical on every refresh for the same calendar day.
   const [masterSalesList] = useState<Sale[]>(() => generateMasterSalesList());
 
   const { filteredSales } = useMemo(() => {
@@ -112,6 +139,9 @@ export const useSimulatedData = ({ period, from, to }: UseSimulatedDataProps) =>
     switch (period) {
       case 'today':
         start = startOfDay(now);
+        // Important: For "Today", we limit the end time to NOW.
+        // This effectively "unlocks" the deterministic sales as the day progresses.
+        end = now;
         break;
       case 'yesterday':
         start = startOfDay(subDays(now, 1));
@@ -122,6 +152,8 @@ export const useSimulatedData = ({ period, from, to }: UseSimulatedDataProps) =>
         break;
       case 'this-month':
         start = startOfMonth(now);
+        // Ensure we don't show future sales for today in the month view either
+        end = now;
         break;
       case 'last-month':
         start = startOfMonth(subMonths(now, 1));
@@ -129,9 +161,11 @@ export const useSimulatedData = ({ period, from, to }: UseSimulatedDataProps) =>
         break;
       case 'this-year':
         start = startOfYear(now);
+        end = now;
         break;
       case 'all-time':
-        start = subDays(now, 365); // "Todo o Tempo" in this context is 1 year
+        start = subDays(now, 365);
+        end = now;
         break;
       case 'custom':
         const customStart = from ? parseISO(from) : null;
@@ -153,23 +187,25 @@ export const useSimulatedData = ({ period, from, to }: UseSimulatedDataProps) =>
     const paidSales = filteredSales.filter(s => s.status === 'paid');
     const grossRevenue = paidSales.reduce((acc, s) => acc + s.value, 0);
 
-    // Logic: 2.5% fee and 6% taxes
     const fees = grossRevenue * FEE_RATE;
     const taxes = grossRevenue * TAX_RATE;
     const netRevenue = grossRevenue - fees - taxes;
-    const adSpend = 0; // Simulated organic only
+    const adSpend = 0;
     const profit = netRevenue - adSpend;
     const margin = netRevenue > 0 ? (profit / netRevenue) * 100 : 0;
     const arpu = paidSales.length > 0 ? grossRevenue / paidSales.length : 0;
 
-    // Simulated dynamic pending values based on filter
+    // Use seeded RNG for pending values to ensure consistency on refresh
+    const dateSeed = parseInt(format(new Date(), 'yyyyMMdd'), 10);
+    const rng = new SeededRNG(dateSeed + period.length); // simple variant seed
+    const variance = 0.8 + rng.next() * 0.4;
+
     let pendingValue = 0;
-    const variance = () => 0.8 + Math.random() * 0.4; // +/- 20%
-    if (period === 'today') pendingValue = 400 * variance();
-    else if (period === 'yesterday') pendingValue = 600 * variance();
-    else if (period === 'last-7-days') pendingValue = 1432.24 * variance();
-    else if (period === 'this-month') pendingValue = 8653.65 * variance();
-    else pendingValue = 12000 * variance();
+    if (period === 'today') pendingValue = 400 * variance;
+    else if (period === 'yesterday') pendingValue = 600 * variance;
+    else if (period === 'last-7-days') pendingValue = 1432.24 * variance;
+    else if (period === 'this-month') pendingValue = 8653.65 * variance;
+    else pendingValue = 12000 * variance;
 
     return {
       grossRevenue,
