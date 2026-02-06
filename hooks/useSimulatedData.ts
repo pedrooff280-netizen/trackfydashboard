@@ -78,8 +78,6 @@ const generateMasterSalesList = (): Sale[] => {
   const yearStart = startOfYear(today);
 
   // 1. TODAY: Fixed Seed based on Date
-  // We generate a full day of sales (up to 23:59:59) deterministically.
-  // The filtering logic in the hook will hide future sales.
   const seedToday = getSeedFromDate(today);
   const rngToday = new SeededRNG(seedToday);
   const salesToday = generateSalesForAmount(TARGETS.revenueToday, startOfDay(today), endOfDay(today), rngToday);
@@ -89,26 +87,40 @@ const generateMasterSalesList = (): Sale[] => {
   const rngYesterday = new SeededRNG(seedYesterday);
   const salesYesterday = generateSalesForAmount(TARGETS.revenueYesterday, startOfDay(yesterday), endOfDay(yesterday), rngYesterday);
 
-  // 3. THIS MONTH (excluding today/yesterday for generating "remainder"): 
-  // We use a fixed month seed.
+  // 3. THIS MONTH (Pro-rated for days passed)
+  // Instead of forcing the specific remaining target, we calculate a daily run rate
+  // based on the monthly target, and apply it only to the days that have passed so far.
   const seedMonth = parseInt(format(today, 'yyyyMM'), 10);
   const rngMonth = new SeededRNG(seedMonth);
-  const monthAccumulated = TARGETS.revenueToday + TARGETS.revenueYesterday;
-  const remainingThisMonth = Math.max(0, TARGETS.revenueThisMonth - monthAccumulated);
-  // Generate for period [StartOfMonth -> Yesterday-2days]
-  const salesRemainingMonth = generateSalesForAmount(remainingThisMonth, thisMonthStart, subDays(yesterday, 1), rngMonth);
+
+  const daysInThisMonth = parseInt(format(endOfMonth(today), 'd'), 10);
+  const dailyRunRate = TARGETS.revenueThisMonth / daysInThisMonth;
+  const daysPassedUntilYesterday = Math.max(0, parseInt(format(yesterday, 'd'), 10) - 1); // Days before yesterday in this month
+
+  // We only generate revenue for the days strictly between StartOfMonth and Yesterday (exclusive)
+  // If today is the 1st or 2nd, this might be 0 days, which is correct.
+  const targetForPassedDays = Math.floor(dailyRunRate * daysPassedUntilYesterday);
+
+  const salesRemainingMonth = generateSalesForAmount(targetForPassedDays, thisMonthStart, subDays(yesterday, 1), rngMonth);
 
   // 4. LAST MONTH
   const seedLastMonth = parseInt(format(subMonths(today, 1), 'yyyyMM'), 10);
   const rngLastMonth = new SeededRNG(seedLastMonth);
   const salesLastMonth = generateSalesForAmount(TARGETS.revenueLastMonth, lastMonthStart, lastMonthEnd, rngLastMonth);
 
-  // 5. REMAINING YEAR
+  // 5. REMAINING YEAR (Pro-rated)
   const seedYear = parseInt(format(today, 'yyyy'), 10);
   const rngYear = new SeededRNG(seedYear);
-  const yearAccumulated = TARGETS.revenueThisMonth + TARGETS.revenueLastMonth;
-  const remainingYearTarget = Math.max(0, ANNUAL_REVENUE_TARGET - yearAccumulated);
-  const salesRestOfYear = generateSalesForAmount(remainingYearTarget, yearStart, subDays(lastMonthStart, 1), rngYear);
+
+  // Similarly, distribute annual revenue realistically over the past months of the year
+  // (excluding data we already generated for this month/last month)
+  const calculateYearlyRemainder = () => {
+    // Very rough approximation for "rest of year" to avoid complex day math
+    // Just ensure we have some data for the charts for previous months
+    return ANNUAL_REVENUE_TARGET * 0.4; // Simulate ~40% of year target as "past history"
+  };
+
+  const salesRestOfYear = generateSalesForAmount(calculateYearlyRemainder(), yearStart, subDays(lastMonthStart, 1), rngYear);
 
   return [
     ...salesToday,
