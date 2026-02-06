@@ -6,7 +6,7 @@ export const Header: React.FC = () => {
   return (
     <header className="h-20 bg-[#161a2b] text-white flex items-center justify-between px-8 border-b border-gray-800 shrink-0">
       <div className="flex items-center gap-2 cursor-pointer hover:bg-white/5 p-2 rounded-lg transition-colors">
-        <span className="font-medium">Bem-vindo, João</span>
+        <span className="font-medium">Bem-vindo, Pedro</span>
         <ChevronDown size={16} />
       </div>
 
