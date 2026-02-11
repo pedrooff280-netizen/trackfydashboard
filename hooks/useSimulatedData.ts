@@ -9,19 +9,20 @@ import {
   startOfMonth,
   endOfMonth,
   subMonths,
-  isWithinInterval,
   startOfYear,
+  isWithinInterval,
   parseISO,
   isValid,
   format
 } from 'date-fns';
+
+import { saveSalesForDate, getSalesForDate, getAllStoredSales } from '../utils/persistence';
 
 // Helper to create a stable seed from dates
 const getSeedFromDate = (date: Date): number => {
   return parseInt(format(date, 'yyyyMMdd'), 10);
 };
 
-// Modified: Accepts RNG instance instead of using Math.random
 const generateSalesForAmount = (target: number, startDate: Date, endDate: Date, rng: SeededRNG): Sale[] => {
   const sales: Sale[] = [];
   let currentTotal = 0;
@@ -29,22 +30,17 @@ const generateSalesForAmount = (target: number, startDate: Date, endDate: Date, 
   if (target <= 0 || startDate >= endDate) return [];
 
   let iterations = 0;
-  // Safety cap to prevent infinite loops or performance hits
   while (currentTotal < target && iterations < 5000) {
     iterations++;
-    // Deterministic value selection
     const value = rng.pick(TICKETS);
 
-    // Allow a small "random" overshoot for realism using RNG
-    if (currentTotal + value > target + (1500 * rng.next())) break;
+    if (currentTotal + value > target + (500 * rng.next())) break;
 
-    // Deterministic date selection within the range
     const timeSpan = endDate.getTime() - startDate.getTime();
     const date = new Date(startDate.getTime() + rng.next() * timeSpan);
 
     const statusRand = rng.next();
     let status: SaleStatus = 'paid';
-    // 5% pending/refunded/chargeback for realism
     if (statusRand > 0.95) status = 'pending';
     else if (statusRand > 0.98) status = 'refunded';
 
@@ -54,7 +50,7 @@ const generateSalesForAmount = (target: number, startDate: Date, endDate: Date, 
     else if (payRand > 0.9) paymentMethod = 'Boleto';
 
     sales.push({
-      id: Math.floor(rng.next() * 1000000).toString(36), // Stable ID from RNG
+      id: Math.floor(rng.next() * 1000000).toString(36),
       value,
       date,
       paymentMethod,
@@ -68,67 +64,27 @@ const generateSalesForAmount = (target: number, startDate: Date, endDate: Date, 
   return sales;
 };
 
-// Generates the immutable list of all potential sales
 const generateMasterSalesList = (): Sale[] => {
-  const today = new Date();
-  const yesterday = subDays(today, 1);
-  const thisMonthStart = startOfMonth(today);
-  const lastMonthStart = startOfMonth(subMonths(today, 1));
-  const lastMonthEnd = endOfMonth(subMonths(today, 1));
-  const yearStart = startOfYear(today);
+  const now = new Date();
 
-  // 1. TODAY: Fixed Seed based on Date
-  const seedToday = getSeedFromDate(today);
-  const rngToday = new SeededRNG(seedToday);
-  const salesToday = generateSalesForAmount(TARGETS.revenueToday, startOfDay(today), endOfDay(today), rngToday);
+  // Garantir que temos dados para os últimos 30 dias de forma persistente
+  for (let i = 0; i < 30; i++) {
+    const date = subDays(now, i);
+    const dateKey = format(date, 'yyyy-MM-dd');
 
-  // 2. YESTERDAY: Fixed Seed based on Yesterday's Date
-  const seedYesterday = getSeedFromDate(yesterday);
-  const rngYesterday = new SeededRNG(seedYesterday);
-  const salesYesterday = generateSalesForAmount(TARGETS.revenueYesterday, startOfDay(yesterday), endOfDay(yesterday), rngYesterday);
+    let dailySales = getSalesForDate(dateKey);
 
-  // 3. THIS MONTH (Pro-rated for days passed)
-  // Instead of forcing the specific remaining target, we calculate a daily run rate
-  // based on the monthly target, and apply it only to the days that have passed so far.
-  const seedMonth = parseInt(format(today, 'yyyyMM'), 10);
-  const rngMonth = new SeededRNG(seedMonth);
+    if (!dailySales) {
+      const seed = getSeedFromDate(date);
+      const rng = new SeededRNG(seed);
+      // Meta de ~500 EUR (3000 BRL)
+      const target = TARGETS.revenueToday;
+      dailySales = generateSalesForAmount(target, startOfDay(date), endOfDay(date), rng);
+      saveSalesForDate(dateKey, dailySales);
+    }
+  }
 
-  const daysInThisMonth = parseInt(format(endOfMonth(today), 'd'), 10);
-  const dailyRunRate = TARGETS.revenueThisMonth / daysInThisMonth;
-  const daysPassedUntilYesterday = Math.max(0, parseInt(format(yesterday, 'd'), 10) - 1); // Days before yesterday in this month
-
-  // We only generate revenue for the days strictly between StartOfMonth and Yesterday (exclusive)
-  // If today is the 1st or 2nd, this might be 0 days, which is correct.
-  const targetForPassedDays = Math.floor(dailyRunRate * daysPassedUntilYesterday);
-
-  const salesRemainingMonth = generateSalesForAmount(targetForPassedDays, thisMonthStart, subDays(yesterday, 1), rngMonth);
-
-  // 4. LAST MONTH
-  const seedLastMonth = parseInt(format(subMonths(today, 1), 'yyyyMM'), 10);
-  const rngLastMonth = new SeededRNG(seedLastMonth);
-  const salesLastMonth = generateSalesForAmount(TARGETS.revenueLastMonth, lastMonthStart, lastMonthEnd, rngLastMonth);
-
-  // 5. REMAINING YEAR (Pro-rated)
-  const seedYear = parseInt(format(today, 'yyyy'), 10);
-  const rngYear = new SeededRNG(seedYear);
-
-  // Similarly, distribute annual revenue realistically over the past months of the year
-  // (excluding data we already generated for this month/last month)
-  const calculateYearlyRemainder = () => {
-    // Very rough approximation for "rest of year" to avoid complex day math
-    // Just ensure we have some data for the charts for previous months
-    return ANNUAL_REVENUE_TARGET * 0.4; // Simulate ~40% of year target as "past history"
-  };
-
-  const salesRestOfYear = generateSalesForAmount(calculateYearlyRemainder(), yearStart, subDays(lastMonthStart, 1), rngYear);
-
-  return [
-    ...salesToday,
-    ...salesYesterday,
-    ...salesRemainingMonth,
-    ...salesLastMonth,
-    ...salesRestOfYear
-  ].sort((a, b) => b.date.getTime() - a.date.getTime());
+  return getAllStoredSales().sort((a, b) => b.date.getTime() - a.date.getTime());
 };
 
 interface UseSimulatedDataProps {

@@ -1,14 +1,14 @@
 
 import { PeriodFilter } from './types';
 
-export const TICKETS = [600, 900, 1200, 1500];
+export const TICKETS = [180.00, 200.00, 220.00, 240.00]; // ~30-40 EUR (câmbio 6.0)
 export const EXCHANGE_RATE_EUR = 6.00;
-export const ANNUAL_REVENUE_TARGET = 250000;
+export const ANNUAL_REVENUE_TARGET = 1000000; // ~166k EUR
 export const TARGETS = {
-  revenueThisMonth: 38550,
-  revenueLastMonth: 36700,
-  revenueToday: 1800,
-  revenueYesterday: 2400,
+  revenueThisMonth: 90000, // ~15k EUR
+  revenueLastMonth: 93000,
+  revenueToday: 3000,      // ~500 EUR
+  revenueYesterday: 3000,
 };
 
 export const FEE_RATE = 0.025; // 2.5%
